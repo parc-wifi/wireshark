@@ -34,6 +34,8 @@
 /* main domain */
 #define LOG_DOMAIN_MAIN				"Main"
 
+#define LOG_DOMAIN_TIMELINE			"TimeLine"
+
 /* enable very verbose capture log debug output */
 /* (might slightly degrade performance) */
 /*#define LOG_CAPTURE_VERBOSE*/

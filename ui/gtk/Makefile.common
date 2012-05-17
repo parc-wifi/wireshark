@@ -137,6 +137,7 @@ WIRESHARK_GTK_SRC = \
 	tap_param_dlg.c	\
 	text_page_utils.c	\
 	time_shift_dlg.c	\
+	timeline.c	\
 	uat_gui.c	\
 	voip_calls.c	\
 	webbrowser.c	\
@@ -336,6 +337,7 @@ noinst_HEADERS = \
 	supported_protos_dlg.h   \
 	tap_param_dlg.h	\
 	text_page_utils.h	\
+	timeline.h	\
 	uat_gui.h \
 	voip_calls.h	\
 	voip_calls_dlg.h \

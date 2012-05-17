@@ -177,6 +177,7 @@
 #include "ui/gtk/filter_expression_save_dlg.h"
 
 #include "ui/gtk/old-gtk-compat.h"
+#include "ui/gtk/timeline.h"
 
 #ifdef HAVE_LIBPCAP
 #include "../../image/wsicon16.xpm"
@@ -213,7 +214,7 @@ capture_file cfile;
 static gboolean capture_stopping;
 
 /* "exported" main widgets */
-GtkWidget   *top_level = NULL, *pkt_scrollw, *tree_view_gbl, *byte_nb_ptr_gbl;
+GtkWidget   *top_level = NULL, *pkt_scrollw, *timeline, *tree_view_gbl, *byte_nb_ptr_gbl;
 
 /* placement widgets (can be a bit confusing, because of the many layout possibilities */
 static GtkWidget   *main_vbox, *main_pane_v1, *main_pane_v2, *main_pane_h1, *main_pane_h2;
@@ -2173,7 +2174,7 @@ main(int argc, char *argv[])
 #endif
 #endif
 #endif
-  gint                 pl_size = 280, tv_size = 95, bv_size = 75;
+  gint                 pl_size = 280, tv_size = 95, bv_size = 75, tl_size = 175;
   gchar               *rc_file, *cf_name = NULL, *rfilter = NULL, *dfilter = NULL, *jfilter = NULL;
   dfilter_t           *rfcode = NULL;
   gboolean             rfilter_parse_failed = FALSE;
@@ -2973,6 +2974,8 @@ main(int argc, char *argv[])
 
   stock_icons_init();
 
+  timeline_init();
+
   /* close the splash screen, as we are going to open the main window now */
   splash_destroy(splash_win);
 
@@ -3419,6 +3422,7 @@ void main_widgets_rearrange(void) {
     g_object_ref(G_OBJECT(main_pane_v2));
     g_object_ref(G_OBJECT(main_pane_h1));
     g_object_ref(G_OBJECT(main_pane_h2));
+    g_object_ref(G_OBJECT(timeline));
     g_object_ref(G_OBJECT(welcome_pane));
 
     /* empty all containers participating */
@@ -3443,6 +3447,9 @@ void main_widgets_rearrange(void) {
 
     /* airpcap toolbar */
     gtk_box_pack_start(GTK_BOX(main_vbox), wireless_tb, FALSE, TRUE, 1);
+
+    /* add the timeline */
+    gtk_box_pack_start(GTK_BOX(main_vbox), timeline, FALSE, TRUE, 0);
 
     /* fill the main layout panes */
     switch(prefs.gui_layout_type) {
@@ -3597,6 +3604,12 @@ main_widgets_show_or_hide(void)
         gtk_widget_hide(main_second_pane);
     }
 
+    if (have_capture_file /* TODO && capture file is radiotap */) {
+    	gtk_widget_show(timeline);
+    } else {
+    	gtk_widget_hide(timeline);
+    }
+
     if (!have_capture_file) {
         if(welcome_pane) {
             gtk_widget_show(welcome_pane);
@@ -3706,6 +3719,11 @@ create_main_window (gint pl_size, gint tv_size, gint bv_size, e_prefs *prefs_p)
     pkt_scrollw = packet_list_create();
     gtk_widget_set_size_request(pkt_scrollw, -1, pl_size);
     gtk_widget_show_all(pkt_scrollw);
+
+    /* Packet timeline */
+    timeline = timeline_create();
+//    gtk_widget_set_size_request(timeline, -1, tl_size);
+    gtk_widget_show_all(timeline);
 
     /* Tree view */
     tv_scrollw = proto_tree_view_new(prefs_p, &tree_view_gbl);
