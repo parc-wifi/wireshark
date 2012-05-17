@@ -11422,8 +11422,10 @@ dissect_ieee80211_common (tvbuff_t * tvb, packet_info * pinfo,
 
       if (tree)
       {
+        proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_ra, tvb, 4, 6, dst);
         proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_da, tvb, 4, 6, dst);
 
+        proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_ta, tvb, 10, 6, src);
         proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_sa, tvb, 10, 6, src);
 
         proto_tree_add_item (hdr_tree, hf_ieee80211_addr_bssid, tvb, 16, 6, ENC_NA);
@@ -11796,7 +11798,9 @@ dissect_ieee80211_common (tvbuff_t * tvb, packet_info * pinfo,
         {
 
           case DATA_ADDR_T1:
+            proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ra, tvb, 4, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_da, tvb, 4, 6, dst);
+            proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ta, tvb, 10, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_sa, tvb, 10, 6, src);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_bssid, tvb, 16, 6, bssid);
             proto_tree_add_uint (hdr_tree, hf_ieee80211_frag_number, tvb, 22, 2,
@@ -11814,7 +11818,9 @@ dissect_ieee80211_common (tvbuff_t * tvb, packet_info * pinfo,
             break;
 
           case DATA_ADDR_T2:
+              proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ra, tvb, 4, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_da, tvb, 4, 6, dst);
+            proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ta, tvb, 10, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_bssid, tvb, 10, 6, bssid);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_sa, tvb, 16, 6, src);
             proto_tree_add_uint (hdr_tree, hf_ieee80211_frag_number, tvb, 22, 2,
@@ -11832,7 +11838,9 @@ dissect_ieee80211_common (tvbuff_t * tvb, packet_info * pinfo,
             break;
 
           case DATA_ADDR_T3:
+              proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ra, tvb, 4, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_bssid, tvb, 4, 6, bssid);
+            proto_tree_add_item (hdr_tree, hf_ieee80211_addr_ta, tvb, 10, 6, ENC_NA);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_sa, tvb, 10, 6, src);
             proto_tree_add_ether (hdr_tree, hf_ieee80211_addr_da, tvb, 16, 6, dst);
 
