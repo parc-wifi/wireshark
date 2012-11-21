@@ -34,11 +34,4 @@ void proto_register_radiotap(void);
 void proto_reg_handoff_radiotap(void);
 
 struct _radiotap_info {
-  guint radiotap_length;
-  guint32 rate;
-  gint8 dbm_antsignal;
-  gint8 dbm_antnoise;
-  guint32 freq;
-  guint32 flags;
-  guint64 tsft;
 };

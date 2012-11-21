@@ -685,8 +685,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	version = tvb_get_guint8(tvb, 0);
 	length = tvb_get_letohs(tvb, 2);
 
-	radiotap_info->radiotap_length = length;
-
 	col_add_fstr(pinfo->cinfo, COL_INFO, "Radiotap Capture v%u, Length %u",
 		     version, length);
 
@@ -893,12 +891,11 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		switch (iter.this_arg_index) {
 
 		case IEEE80211_RADIOTAP_TSFT:
-			radiotap_info->tsft = tvb_get_letoh64(tvb, offset);
 			if (tree) {
 				proto_tree_add_uint64(radiotap_tree,
 						      hf_radiotap_mactime, tvb,
 						      offset, 8,
-						      radiotap_info->tsft);
+						      tvb_get_letoh64(tvb, offset));
 			}
 			break;
 
@@ -994,7 +991,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 								    "Data Rate: %.1f Mb/s",
 								    (float)rate / 2);
 				}
-				radiotap_info->rate = rate;
 			}
 			break;
 		}
@@ -1060,8 +1056,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 				proto_tree_add_boolean(flags_tree,
 						       hf_radiotap_channel_flags_quarter,
 						       tvb, offset + 3, 1, flags);
-				radiotap_info->freq = freq;
-				radiotap_info->flags = flags;
 			}
 			break;
 		}
@@ -1085,7 +1079,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 							  "SSI Signal: %d dBm",
 							  dbm);
 			}
-			radiotap_info->dbm_antsignal = dbm;
 			break;
 
 		case IEEE80211_RADIOTAP_DBM_ANTNOISE:
@@ -1097,7 +1090,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 							  "SSI Noise: %d dBm",
 							  dbm);
 			}
-			radiotap_info->dbm_antnoise = dbm;
 			break;
 
 		case IEEE80211_RADIOTAP_LOCK_QUALITY:
