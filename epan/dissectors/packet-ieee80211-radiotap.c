@@ -201,6 +201,7 @@ static int hf_radiotap_flags_shortgi = -1;
 static int hf_radiotap_quality = -1;
 static int hf_radiotap_fcs = -1;
 static int hf_radiotap_fcs_bad = -1;
+static int hf_radiotap_duration = -1;
 
 static gint ett_radiotap = -1;
 static gint ett_radiotap_present = -1;
@@ -225,6 +226,8 @@ static int radiotap_tap = -1;
 /* Settings */
 static gboolean radiotap_bit14_fcs = FALSE;
 static gboolean radiotap_interpret_high_rates_as_mcs = FALSE;
+static gboolean radiotap_assume_fec_bcc = 0;
+static gboolean radiotap_assume_short_preamble = 0;
 
 static void
 dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree);
@@ -441,6 +444,21 @@ static const guint16 ieee80211_ht_Dbps[MAX_MCS_INDEX+1] = {
 	390, 468, 546, 468, 546, 624, 702, 624, 702, 780, 780, 858
 };
 
+static const guint8 ieee80211_ht_streams[MAX_MCS_INDEX+1] = {
+	1,1,1,1,1,1,1,1,2,2,2,2,2,2,2,2,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,
+	1,2,2,2,2,2,2,3,3,3,3,3,3,3,3,3,3,3,3,3,3,4,4,4,4,4,4,4,4,4,4,4,
+	4,4,4,4,4,4,4,4,4,4,4,4,4
+};
+
+static const guint8 ieee80211_ht_Nes[MAX_MCS_INDEX+1] = {
+	1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,
+	1,1,1,1,1,2,2,2, 1,1,1,1,2,2,2,2,
+	1,
+	1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+	1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,2,2,2,2,2,2,2
+};
+
 /* In order by value */
 static const value_string phy_type[] = {
 	{0,                                       "Unknown"},                 /* 0x00000 */
@@ -602,6 +620,7 @@ capture_radiotap(const guchar * pd, int offset, int len, packet_counts * ld)
 		capture_ieee80211(pd, offset + it_len, len, ld);
 }
 
+
 static void
 dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 {
@@ -610,11 +629,12 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	proto_tree *ft;
 	proto_item *ti                = NULL;
 	proto_item *hidden_item;
-	int         offset;
-	tvbuff_t   *next_tvb;
-	guint8      version;
-	guint       length;
-	guint32     freq;
+	int offset;
+	tvbuff_t *next_tvb;
+	guint8 version;
+	guint length; /* length of radiotap header */
+	guint frame_length; /* length of 802.11 frame data */
+	guint32 rate = 0, freq;
 	proto_item *rate_ti;
 	gint8       dbm, db;
 	guint8      rflags            = 0;
@@ -628,6 +648,19 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	struct _radiotap_info              *radiotap_info;
 	static struct _radiotap_info        rtp_info_arr;
 	struct ieee80211_radiotap_iterator  iter;
+
+	/* MCS stuff here for later duration calculation */
+	guint8 mcs_known = 0;
+	guint8 have_mcs = 0, mcs;
+	guint have_bandwidth = 0, bandwidth; /* 0 = 20, 1 = 40 */
+	guint have_gi_length = 0, gi_length; /* 0 = long, 1 = short */
+	guint have_greenfield = 0, greenfield; /* 0 = mixed, 1 = greenfield */
+	guint have_stbc = 0, stbc;
+	guint have_ness = 0, ness;
+	guint have_fec = 0, fec_ldpc; /* 0 = BCC, 1 = LDPC */
+
+	/* durations in microseconds */
+	guint preamble, duration = 0;
 
 	/* our non-standard overrides */
 	static struct radiotap_override overrides[] = {
@@ -907,7 +940,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 
 		case IEEE80211_RADIOTAP_RATE: {
-			guint32 rate;
 			rate = tvb_get_guint8(tvb, offset);
 			/*
 			 * XXX On FreeBSD rate & 0x80 means we have an MCS. On
@@ -937,12 +969,17 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 				 * information from Flags, at least on
 				 * FreeBSD?
 				 */
+				if (!have_mcs) {
+					have_mcs = 1;
+					mcs = rate & 0x7f;
+				}
 				if (tree) {
 					proto_tree_add_uint(radiotap_tree,
 							    hf_radiotap_mcs_index,
 							    tvb, offset, 1,
 							    rate & 0x7f);
 				}
+				rate = 0;
 			} else {
 				col_add_fstr(pinfo->cinfo, COL_TX_RATE, "%d.%d",
 					     rate / 2, rate & 1 ? 5 : 0);
@@ -1231,11 +1268,8 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 		case IEEE80211_RADIOTAP_MCS: {
 			proto_tree *mcs_tree = NULL, *mcs_known_tree;
-			guint8	    mcs_known, mcs_flags;
-			guint8	    mcs;
-			guint	    bandwidth;
-			guint	    gi_length;
-			gboolean    can_calculate_rate;
+			guint		mcs_flags;
+			gboolean	can_calculate_rate;
 
 			/*
 			 * Start out assuming that we can calculate the rate;
@@ -1247,6 +1281,8 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			mcs_known = tvb_get_guint8(tvb, offset);
 			mcs_flags = tvb_get_guint8(tvb, offset + 1);
 			mcs = tvb_get_guint8(tvb, offset + 2);
+
+			have_mcs = 1;
 
 			if (tree) {
 				proto_item *it;
@@ -1273,42 +1309,48 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 						    tvb, offset, 1, ENC_LITTLE_ENDIAN);
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_BW) {
+				have_bandwidth = 1;
 				bandwidth = ((mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK) == IEEE80211_RADIOTAP_MCS_BW_40) ?
 				    1 : 0;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_bw,
 							    tvb, offset + 1, 1, mcs_flags);
 			} else {
-				bandwidth = 0;
 				can_calculate_rate = FALSE;	/* no bandwidth */
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_GI) {
+				have_gi_length = 1;
 				gi_length = (mcs_flags & IEEE80211_RADIOTAP_MCS_SGI) ?
 				    1 : 0;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_gi,
 							    tvb, offset + 1, 1, mcs_flags);
 			} else {
-				gi_length = 0;
 				can_calculate_rate = FALSE;	/* no GI width */
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_FMT) {
+				have_greenfield = 1;
+				greenfield = (mcs_flags & IEEE80211_RADIOTAP_MCS_FMT_GF) ? 1 : 0;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_format,
 							    tvb, offset + 1, 1, mcs_flags);
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_FEC) {
+				have_fec = 1;
+				fec_ldpc = (mcs_flags & IEEE80211_RADIOTAP_MCS_FEC_LDPC) ? 1 : 0;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_fec,
 							    tvb, offset + 1, 1, mcs_flags);
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_STBC) {
+				have_stbc = 1;
+				stbc = (mcs_flags & IEEE80211_RADIOTAP_MCS_STBC) >> IEEE80211_RADIOTAP_MCS_STBC_SHIFT;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_stbc,
 							    tvb, offset + 1, 1, mcs_flags);
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_NESS) {
-				int ness;
+				have_ness = 1;
 				ness = (mcs_flags & IEEE80211_RADIOTAP_MCS_NESS_BIT0) >> 7;
 				ness |= (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_NESS_BIT1) >> 6;
 				if (mcs_tree)
@@ -1316,6 +1358,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 							    tvb, offset + 0, 2, ness);
 			}
 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS) {
+				have_mcs = 1;
 				if (mcs_tree)
 					proto_tree_add_uint(mcs_tree, hf_radiotap_mcs_index,
 							    tvb, offset + 2, 1, mcs);
@@ -1384,15 +1427,13 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 		case IEEE80211_RADIOTAP_VHT: {
 			proto_item *it, *it_root = NULL;
-			proto_tree *vht_tree	 = NULL, *vht_known_tree = NULL, *user_tree = NULL;
-			guint16	    known, nsts;
-			guint8	    flags, bw, mcs_nss;
-			guint	    bandwidth	 = 0;
-			guint	    gi_length	 = 0;
-			guint	    nss		 = 0;
-			guint	    mcs		 = 0;
-			gboolean    can_calculate_rate;
-			guint	    i;
+			proto_tree *vht_tree = NULL, *vht_known_tree = NULL, *user_tree = NULL;
+			guint16		known, nsts;
+			guint8		flags, bw, mcs_nss;
+			guint		nss = 0;
+			guint		mcs = 0;
+			gboolean	can_calculate_rate;
+			guint		i;
 
 			/*
 			 * Start out assuming that we can calculate the rate;
@@ -1434,6 +1475,8 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			}
 
 			if (known & IEEE80211_RADIOTAP_VHT_HAVE_STBC) {
+				have_stbc = 1;
+				stbc = (flags & IEEE80211_RADIOTAP_VHT_STBC) ? 1 : 0;
 				if (vht_tree)
 					proto_tree_add_item(vht_tree, hf_radiotap_vht_stbc,
 							tvb, offset + 2, 1, ENC_LITTLE_ENDIAN);
@@ -1446,6 +1489,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			}
 
 			if (known & IEEE80211_RADIOTAP_VHT_HAVE_GI) {
+				have_gi_length = 1;
 				gi_length = (flags & IEEE80211_RADIOTAP_VHT_SGI) ? 1 : 0;
 				if (vht_tree) {
 					proto_tree_add_item(vht_tree, hf_radiotap_vht_gi,
@@ -1458,6 +1502,8 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			}
 
 			if (known & IEEE80211_RADIOTAP_VHT_HAVE_LDPC_EXTRA) {
+				have_fec = 1;
+				fec_ldpc = (flags & IEEE80211_RADIOTAP_VHT_LDPC_EXTRA) ? 1 : 0;
 				if (vht_tree) {
 					proto_tree_add_item(vht_tree, hf_radiotap_vht_ldpc_extra,
 							tvb, offset + 2, 1, ENC_LITTLE_ENDIAN);
@@ -1471,9 +1517,10 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			}
 
 			if (known & IEEE80211_RADIOTAP_VHT_HAVE_BW) {
-				if (bw <= sizeof(ieee80211_vht_bw2rate_index)/sizeof(ieee80211_vht_bw2rate_index[0]))
+				if (bw <= sizeof(ieee80211_vht_bw2rate_index)/sizeof(ieee80211_vht_bw2rate_index[0])) {
+					have_bandwidth = 1;
 					bandwidth = ieee80211_vht_bw2rate_index[bw];
-				else
+				} else
 					can_calculate_rate = FALSE; /* unknown bandwidth */
 
 				if (vht_tree)
@@ -1603,12 +1650,120 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 	}
 
+	frame_length = tvb_length(next_tvb);
+
+	if (radiotap_assume_fec_bcc) {
+		have_fec = 1;
+		fec_ldpc = 0;
+	}
+
+	/* calculation of frame duration
+	 * Things we need to know to calculate accurate duration
+	 * 802.11 / 802.11b (DSSS or CCK modulation)
+	 * - length of preamble
+	 * - rate
+	 * 802.11a / 802.11g (OFDM modulation)
+	 * - rate
+	 * 802.11n
+	 * - whether frame preamble is mixed or greenfield, (assume mixed)
+	 * - guard interval, 800ns or 400ns (assume 800ns)
+	 * - bandwidth, 20Mhz or 40Mhz (assume 20Mhz)
+	 * - MCS index - used with previous 2 to calculate rate
+	 * - how many additional STBC streams are used (assume 0)
+	 * - how many optional extension spatial streams are used (assume 0)
+	 * - whether BCC or LDCP coding is used (assume BCC)
+	 */
+
+	if (have_mcs && have_bandwidth && have_gi_length && have_fec
+			&& have_stbc && have_ness && have_greenfield) {
+		/* This is an 802.11n HT frame and we have all the
+		 * fields required to calculate the duration */
+		static const guint Nhtdltf[4] = {1, 2, 4, 4};
+		static const guint Nhteltf[4] = {0, 1, 2, 4};
+		guint Nsts, bits, Mstbc, bits_per_symbol, symbols;
+
+		/* preamble duration
+		 * see ieee802.11n-2009 Figure 20-1 - PPDU format
+		 * for HT-mixed format
+		 * L-STF 8us, L-LTF 8us, L-SIG 4us, HT-SIG 8us, HT_STF 4us
+		 * for HT-greenfield
+		 * HT-GF-STF 8us, HT-LTF1 8us, HT_SIG 8us
+		 */
+		preamble = greenfield ? 24 : 32;
+
+		/* calculate number of HT-LTF training symbols.
+		 * see ieee80211n-2009 20.3.9.4.6 table 20-11 */
+		Nsts = ieee80211_ht_streams[mcs] + stbc;
+		preamble += 4 * (Nhtdltf[Nsts] + Nhteltf[ness]);
+
+		/* data field calculation */
+		if (!fec_ldpc) {
+			/* see ieee80211n-2009 20.3.11 (20-32) - for BCC FEC */
+			bits = 8 * frame_length + 16 + ieee80211_ht_Nes[mcs] * 6;
+			Mstbc = stbc ? 2 : 1;
+			bits_per_symbol = ieee80211_ht_Dbps[mcs] * (bandwidth ? 2 : 1);
+			symbols = bits / (bits_per_symbol * Mstbc);
+		} else {
+			/* TODO: handle LDPC FEC, it changes the rounding */
+		}
+		/* round up to whole symbols */
+		if((bits % (bits_per_symbol * Mstbc)) > 0)
+			symbols++;
+
+		symbols *= Mstbc;
+		duration = preamble + (symbols * (gi_length ? 40 : 36)) / 10;
+	} else if (rate == 2
+			|| rate == 4
+			|| rate == 11
+			|| rate == 22) {
+		/* rate is 1, 2, 5.5 or 11Mbit
+		 * assume a DSSS or CCK frame */
+
+		/* determine the preamble length from the radiotap flags field */
+		preamble = (radiotap_assume_short_preamble || (rflags & IEEE80211_RADIOTAP_F_SHORTPRE))
+				? (72 + 24) : (144 + 48);
+		duration = preamble + frame_length * 4 / rate;
+
+		/* round up to whole microseconds */
+		if (frame_length * 4 % rate)
+			duration++;
+	} else if (rate == 12
+			|| rate == 18
+			|| rate == 24
+			|| rate == 36
+			|| rate == 48
+			|| rate == 72
+			|| rate == 96
+			|| rate == 108) {
+		guint bits, symbols;
+		/* rate is 6, 9, 12, 18, 24, 36, 48 or 54Mbit
+		 * assume an 11a or 11g OFDM frame */
+
+		/* preamble + signal */
+		preamble = 16 + 4;
+		/* 16 service bits, data and 6 tail bits */
+		bits = 16 + 8 * frame_length + 6;
+
+		symbols = bits / (rate * 2);
+		/* round up to whole symbols */
+		if (bits % (rate * 2)) symbols++;
+
+		duration = preamble + symbols * 4;
+	}
+
+    if (duration != 0) {
+		proto_item *item = proto_tree_add_uint_format(radiotap_tree,
+				hf_radiotap_duration, tvb, 0, 0, (guint32) duration,
+				"duration: %'u us", (unsigned int) duration);
+		PROTO_ITEM_SET_GENERATED(item);
+	}
+
+	tap_queue_packet(radiotap_tap, pinfo, radiotap_info);
+
 	/* dissect the 802.11 header next */
 	call_dissector((rflags & IEEE80211_RADIOTAP_F_DATAPAD) ?
 		       ieee80211_datapad_handle : ieee80211_handle,
 		       next_tvb, pinfo, tree);
-
-	tap_queue_packet(radiotap_tap, pinfo, radiotap_info);
 }
 
 
@@ -2422,6 +2577,12 @@ void proto_register_radiotap(void)
 		  FT_BOOLEAN, BASE_NONE, NULL, 0x0,
 		  "Specifies if this frame has a bad frame check sequence", HFILL}},
 
+		{&hf_radiotap_duration,
+		 {"frame duration", "radiotap.duration",
+		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  "Duration of the frame in microseconds, calculated from the modulation, rate and data length",
+		  HFILL}},
+
 	};
 	static gint *ett[] = {
 		&ett_radiotap,
@@ -2460,8 +2621,18 @@ void proto_register_radiotap(void)
 
 	prefs_register_bool_preference(radiotap_module, "interpret_high_rates_as_mcs",
 				       "Interpret high rates as MCS",
-				       "Some generators use rates with bit 7 set to indicate an MCS.",
+				       "Some generators use the datarate field with bit 7 set to indicate an MCS.",
 				       &radiotap_interpret_high_rates_as_mcs);
+
+	prefs_register_bool_preference(radiotap_module, "assume_fec_bcc",
+					   "Assume HT FEC is BCC",
+					   "Some generators do not report the FEC type.",
+					   &radiotap_assume_fec_bcc);
+
+	prefs_register_bool_preference(radiotap_module, "assume_short_preamble",
+					   "Assume short preamble, even if flags says long",
+					   "Some generators incorrectly report long preamble on all frames.",
+					   &radiotap_assume_short_preamble);
 }
 
 void proto_reg_handoff_radiotap(void)
