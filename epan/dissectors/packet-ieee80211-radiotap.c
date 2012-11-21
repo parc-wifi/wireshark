@@ -404,399 +404,37 @@ static value_string_ext vht_bandwidth_ext = VALUE_STRING_EXT_INIT(vht_bandwidth)
 #define MAX_MCS_INDEX	76
 
 /*
- * Indices are:
- *
- *	the MCS index (0-76);
- *
- *	0 for 20 MHz, 1 for 40 MHz;
- *
- *	0 for a long guard interval, 1 for a short guard interval.
+ * Lookup for the MCS index (0-76)
+ * returning the number of data bits per symbol
+ * double the bits if using a 40Mhz channel
+ * symbols are 4us for long guard interval, 3.6us for short guard interval
+ * Note: MCS 32 is special - only valid for 40Mhz channel.
  */
-static const float ieee80211_float_htrates[MAX_MCS_INDEX+1][2][2] = {
-	/* MCS  0  */
-	{	/* 20 Mhz */ {    6.5f,		/* SGI */    7.2f, },
-		/* 40 Mhz */ {   13.5f,		/* SGI */   15.0f, },
-	},
+static const guint16 ieee80211_ht_Dbps[MAX_MCS_INDEX+1] = {
+	/* MCS  0 - 1 stream */
+	26, 52, 78, 104, 156, 208, 234, 260,
 
-	/* MCS  1  */
-	{	/* 20 Mhz */ {   13.0f,		/* SGI */   14.4f, },
-		/* 40 Mhz */ {   27.0f,		/* SGI */   30.0f, },
-	},
+	/* MCS  8 - 2 stream */
+	52, 104, 156, 208, 312, 416, 468, 520,
 
-	/* MCS  2  */
-	{	/* 20 Mhz */ {   19.5f,		/* SGI */   21.7f, },
-		/* 40 Mhz */ {   40.5f,		/* SGI */   45.0f, },
-	},
+	/* MCS 16 - 3 stream */
+	78, 156, 234, 312, 468, 624, 702, 780,
 
-	/* MCS  3  */
-	{	/* 20 Mhz */ {   26.0f,		/* SGI */   28.9f, },
-		/* 40 Mhz */ {   54.0f,		/* SGI */   60.0f, },
-	},
+	/* MCS 24 - 4 stream */
+	104, 208, 312, 416, 624, 832, 936, 1040,
 
-	/* MCS  4  */
-	{	/* 20 Mhz */ {   39.0f,		/* SGI */   43.3f, },
-		/* 40 Mhz */ {   81.0f,		/* SGI */   90.0f, },
-	},
+	/* MCS 32 - 1 stream */
+	12, /* only valid for 40Mhz - 11a/g DUP mode */
 
-	/* MCS  5  */
-	{	/* 20 Mhz */ {   52.0f,		/* SGI */   57.8f, },
-		/* 40 Mhz */ {  108.0f,		/* SGI */  120.0f, },
-	},
+	/* MCS 33 - 2 stream */
+	156, 208, 260, 234, 312, 390,
 
-	/* MCS  6  */
-	{	/* 20 Mhz */ {   58.5f,		/* SGI */   65.0f, },
-		/* 40 Mhz */ {  121.5f,		/* SGI */  135.0f, },
-	},
+	/* MCS 39 - 3 stream */
+	208, 260, 260, 312, 364, 364, 416, 312, 390, 390, 468, 546, 546, 624,
 
-	/* MCS  7  */
-	{	/* 20 Mhz */ {   65.0f,		/* SGI */   72.2f, },
-		/* 40 Mhz */ {   135.0f,	/* SGI */  150.0f, },
-	},
-
-	/* MCS  8  */
-	{	/* 20 Mhz */ {   13.0f,		/* SGI */   14.4f, },
-		/* 40 Mhz */ {   27.0f,		/* SGI */   30.0f, },
-	},
-
-	/* MCS  9  */
-	{	/* 20 Mhz */ {   26.0f,		/* SGI */   28.9f, },
-		/* 40 Mhz */ {   54.0f,		/* SGI */   60.0f, },
-	},
-
-	/* MCS 10  */
-	{	/* 20 Mhz */ {   39.0f,		/* SGI */   43.3f, },
-		/* 40 Mhz */ {   81.0f,		/* SGI */   90.0f, },
-	},
-
-	/* MCS 11  */
-	{	/* 20 Mhz */ {   52.0f,		/* SGI */   57.8f, },
-		/* 40 Mhz */ {  108.0f,		/* SGI */  120.0f, },
-	},
-
-	/* MCS 12  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 13  */
-	{	/* 20 Mhz */ {  104.0f,		/* SGI */  115.6f, },
-		/* 40 Mhz */ {  216.0f,		/* SGI */  240.0f, },
-	},
-
-	/* MCS 14  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 15  */
-	{	/* 20 Mhz */ {  130.0f,		/* SGI */  144.4f, },
-		/* 40 Mhz */ {  270.0f,		/* SGI */  300.0f, },
-	},
-
-	/* MCS 16  */
-	{	/* 20 Mhz */ {   19.5f,		/* SGI */   21.7f, },
-		/* 40 Mhz */ {   40.5f,		/* SGI */   45.0f, },
-	},
-
-	/* MCS 17  */
-	{	/* 20 Mhz */ {   39.0f,		/* SGI */   43.3f, },
-		/* 40 Mhz */ {   81.0f,		/* SGI */   90.0f, },
-	},
-
-	/* MCS 18  */
-	{	/* 20 Mhz */ {   58.5f,		/* SGI */   65.0f, },
-		/* 40 Mhz */ {  121.5f,		/* SGI */  135.0f, },
-	},
-
-	/* MCS 19  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 20  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 21  */
-	{	/* 20 Mhz */ {  156.0f,		/* SGI */  173.3f, },
-		/* 40 Mhz */ {  324.0f,		/* SGI */  360.0f, },
-	},
-
-	/* MCS 22  */
-	{	/* 20 Mhz */ {  175.5f,		/* SGI */  195.0f, },
-		/* 40 Mhz */ {  364.5f,		/* SGI */  405.0f, },
-	},
-
-	/* MCS 23  */
-	{	/* 20 Mhz */ {  195.0f,		/* SGI */  216.7f, },
-		/* 40 Mhz */ {  405.0f,		/* SGI */  450.0f, },
-	},
-
-	/* MCS 24  */
-	{	/* 20 Mhz */ {   26.0f,		/* SGI */   28.9f, },
-		/* 40 Mhz */ {   54.0f,		/* SGI */   60.0f, },
-	},
-
-	/* MCS 25  */
-	{	/* 20 Mhz */ {   52.0f,		/* SGI */   57.8f, },
-		/* 40 Mhz */ {  108.0f,		/* SGI */  120.0f, },
-	},
-
-	/* MCS 26  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 27  */
-	{	/* 20 Mhz */ {  104.0f,		/* SGI */  115.6f, },
-		/* 40 Mhz */ {  216.0f,		/* SGI */  240.0f, },
-	},
-
-	/* MCS 28  */
-	{	/* 20 Mhz */ {  156.0f,		/* SGI */  173.3f, },
-		/* 40 Mhz */ {  324.0f,		/* SGI */  360.0f, },
-	},
-
-	/* MCS 29  */
-	{	/* 20 Mhz */ {  208.0f,		/* SGI */  231.1f, },
-		/* 40 Mhz */ {  432.0f,		/* SGI */  480.0f, },
-	},
-
-	/* MCS 30  */
-	{	/* 20 Mhz */ {  234.0f,		/* SGI */  260.0f, },
-		/* 40 Mhz */ {  486.0f,		/* SGI */  540.0f, },
-	},
-
-	/* MCS 31  */
-	{	/* 20 Mhz */ {  260.0f,		/* SGI */  288.9f, },
-		/* 40 Mhz */ {  540.0f,		/* SGI */  600.0f, },
-	},
-
-	/* MCS 32  */
-	{	/* 20 Mhz */ {    0.0f,		/* SGI */    0.0f, }, /* not valid */
-		/* 40 Mhz */ {    6.0f,		/* SGI */    6.7f, },
-	},
-
-	/* MCS 33  */
-	{	/* 20 Mhz */ {   39.0f,		/* SGI */   43.3f, },
-		/* 40 Mhz */ {   81.0f,		/* SGI */   90.0f, },
-	},
-
-	/* MCS 34  */
-	{	/* 20 Mhz */ {   52.0f,		/* SGI */   57.8f, },
-		/* 40 Mhz */ {  108.0f,		/* SGI */  120.0f, },
-	},
-
-	/* MCS 35  */
-	{	/* 20 Mhz */ {   65.0f,		/* SGI */   72.2f, },
-		/* 40 Mhz */ {  135.0f,		/* SGI */  150.0f, },
-	},
-
-	/* MCS 36  */
-	{	/* 20 Mhz */ {   58.5f,		/* SGI */   65.0f, },
-		/* 40 Mhz */ {  121.5f,		/* SGI */  135.0f, },
-	},
-
-	/* MCS 37  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 38  */
-	{	/* 20 Mhz */ {   97.5f,		/* SGI */  108.3f, },
-		/* 40 Mhz */ {  202.5f,		/* SGI */  225.0f, },
-	},
-
-	/* MCS 39  */
-	{	/* 20 Mhz */ {   52.0f,		/* SGI */   57.8f, },
-		/* 40 Mhz */ {  108.0f,		/* SGI */  120.0f, },
-	},
-
-	/* MCS 40  */
-	{	/* 20 Mhz */ {   65.0f,		/* SGI */   72.2f, },
-		/* 40 Mhz */ {  135.0f,		/* SGI */  150.0f, },
-	},
-
-	/* MCS 41  */
-	{	/* 20 Mhz */ {   65.0f,		/* SGI */   72.2f, },
-		/* 40 Mhz */ {  135.0f,		/* SGI */  150.0f, },
-	},
-
-	/* MCS 42  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 43  */
-	{	/* 20 Mhz */ {   91.0f,		/* SGI */  101.1f, },
-		/* 40 Mhz */ {  189.0f,		/* SGI */  210.0f, },
-	},
-
-	/* MCS 44  */
-	{	/* 20 Mhz */ {   91.0f,		/* SGI */  101.1f, },
-		/* 40 Mhz */ {  189.0f,		/* SGI */  210.0f, },
-	},
-
-	/* MCS 45  */
-	{	/* 20 Mhz */ {  104.0f,		/* SGI */  115.6f, },
-		/* 40 Mhz */ {  216.0f,		/* SGI */  240.0f, },
-	},
-
-	/* MCS 46  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 47  */
-	{	/* 20 Mhz */ {   97.5f,		/* SGI */  108.3f, },
-		/* 40 Mhz */ {  202.5f,		/* SGI */  225.0f, },
-	},
-
-	/* MCS 48  */
-	{	/* 20 Mhz */ {   97.5f,		/* SGI */  108.3f, },
-		/* 40 Mhz */ {  202.5f,		/* SGI */  225.0f, },
-	},
-
-	/* MCS 49  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 50  */
-	{	/* 20 Mhz */ {  136.5f,		/* SGI */  151.7f, },
-		/* 40 Mhz */ {  283.5f,		/* SGI */  315.0f, },
-	},
-
-	/* MCS 51  */
-	{	/* 20 Mhz */ {  136.5f,		/* SGI */  151.7f, },
-		/* 40 Mhz */ {  283.5f,		/* SGI */  315.0f, },
-	},
-
-	/* MCS 52  */
-	{	/* 20 Mhz */ {  156.0f,		/* SGI */  173.3f, },
-		/* 40 Mhz */ {  324.0f,		/* SGI */  360.0f, },
-	},
-
-	/* MCS 53  */
-	{	/* 20 Mhz */ {   65.0f,		/* SGI */   72.2f, },
-		/* 40 Mhz */ {  135.0f,		/* SGI */  150.0f, },
-	},
-
-	/* MCS 54  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 55  */
-	{	/* 20 Mhz */ {   91.0f,		/* SGI */  101.1f, },
-		/* 40 Mhz */ {  189.0f,		/* SGI */  210.0f, },
-	},
-
-	/* MCS 56  */
-	{	/* 20 Mhz */ {   78.0f,		/* SGI */   86.7f, },
-		/* 40 Mhz */ {  162.0f,		/* SGI */  180.0f, },
-	},
-
-	/* MCS 57  */
-	{	/* 20 Mhz */ {   91.0f,		/* SGI */  101.1f, },
-		/* 40 Mhz */ {  189.0f,		/* SGI */  210.0f, },
-	},
-
-	/* MCS 58  */
-	{	/* 20 Mhz */ {  104.0f,		/* SGI */  115.6f, },
-		/* 40 Mhz */ {  216.0f,		/* SGI */  240.0f, },
-	},
-
-	/* MCS 59  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 60  */
-	{	/* 20 Mhz */ {  104.0f,		/* SGI */  115.6f, },
-		/* 40 Mhz */ {  216.0f,		/* SGI */  240.0f, },
-	},
-
-	/* MCS 61  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 62  */
-	{	/* 20 Mhz */ {  130.0f,		/* SGI */  144.4f, },
-		/* 40 Mhz */ {  270.0f,		/* SGI */  300.0f, },
-	},
-
-	/* MCS 63  */
-	{	/* 20 Mhz */ {  130.0f,		/* SGI */  144.4f, },
-		/* 40 Mhz */ {  270.0f,		/* SGI */  300.0f, },
-	},
-
-	/* MCS 64  */
-	{	/* 20 Mhz */ {  143.0f,		/* SGI */  158.9f, },
-		/* 40 Mhz */ {  297.0f,		/* SGI */  330.0f, },
-	},
-
-	/* MCS 65  */
-	{	/* 20 Mhz */ {   97.5f,		/* SGI */  108.3f, },
-		/* 40 Mhz */ {  202.5f,		/* SGI */  225.0f, },
-	},
-
-	/* MCS 66  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 67  */
-	{	/* 20 Mhz */ {  136.5f,		/* SGI */  151.7f, },
-		/* 40 Mhz */ {  283.5f,		/* SGI */  315.0f, },
-	},
-
-	/* MCS 68  */
-	{	/* 20 Mhz */ {  117.0f,		/* SGI */  130.0f, },
-		/* 40 Mhz */ {  243.0f,		/* SGI */  270.0f, },
-	},
-
-	/* MCS 69  */
-	{	/* 20 Mhz */ {  136.5f,		/* SGI */  151.7f, },
-		/* 40 Mhz */ {  283.5f,		/* SGI */  315.0f, },
-	},
-
-	/* MCS 70  */
-	{	/* 20 Mhz */ {  156.0f,		/* SGI */  173.3f, },
-		/* 40 Mhz */ {  324.0f,		/* SGI */  360.0f, },
-	},
-
-	/* MCS 71  */
-	{	/* 20 Mhz */ {  175.5f,		/* SGI */  195.0f, },
-		/* 40 Mhz */ {  364.5f,		/* SGI */  405.0f, },
-	},
-
-	/* MCS 72  */
-	{	/* 20 Mhz */ {  156.0f,		/* SGI */  173.3f, },
-		/* 40 Mhz */ {  324.0f,		/* SGI */  360.0f, },
-	},
-
-	/* MCS 73  */
-	{	/* 20 Mhz */ {  175.5f,		/* SGI */  195.0f, },
-		/* 40 Mhz */ {  364.5f,		/* SGI */  405.0f, },
-	},
-
-	/* MCS 74  */
-	{	/* 20 Mhz */ {  195.0f,		/* SGI */  216.7f, },
-		/* 40 Mhz */ {  405.0f,		/* SGI */  450.0f, },
-	},
-
-	/* MCS 75  */
-	{	/* 20 Mhz */ {  195.0f,		/* SGI */  216.7f, },
-		/* 40 Mhz */ {  405.0f,		/* SGI */  450.0f, },
-	},
-
-	/* MCS 76  */
-	{	/* 20 Mhz */ {  214.5f,		/* SGI */  238.3f, },
-		/* 40 Mhz */ {  445.5f,		/* SGI */  495.0f, },
-	},
+	/* MCS 53 - 4 stream */
+	260, 312, 364, 312, 364, 416, 468, 416, 468, 520, 520, 572,
+	390, 468, 546, 468, 546, 624, 702, 624, 702, 780, 780, 858
 };
 
 /* In order by value */
@@ -1689,16 +1327,16 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			 * 802.11n doesn't support.)
 			 */
 			if (can_calculate_rate && mcs <= MAX_MCS_INDEX
-			    && ieee80211_float_htrates[mcs][bandwidth][gi_length] != 0.0) {
-				col_add_fstr(pinfo->cinfo, COL_TX_RATE, "%.1f",
-					     ieee80211_float_htrates[mcs][bandwidth][gi_length]);
+					&& ieee80211_ht_Dbps[mcs] != 0) {
+				float rate = ieee80211_ht_Dbps[mcs]
+				              * (bandwidth ? 2 : 1)
+				              / (gi_length ? 3.6 : 4.0);
+				col_add_fstr(pinfo->cinfo, COL_TX_RATE, "%.1f", rate);
 				if (tree) {
 					rate_ti = proto_tree_add_float_format(radiotap_tree,
-					    hf_radiotap_datarate,
-					    tvb, offset, 3,
-					    ieee80211_float_htrates[mcs][bandwidth][gi_length],
-					    "Data Rate: %.1f Mb/s",
-					    ieee80211_float_htrates[mcs][bandwidth][gi_length]);
+						hf_radiotap_datarate,
+						tvb, offset, 3, rate,
+						"Data Rate: %.1f Mb/s", rate);
 					PROTO_ITEM_SET_GENERATED(rate_ti);
 				}
 			}
