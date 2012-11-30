@@ -645,8 +645,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	guint32     calc_fcs;
 	gint        err               = -ENOENT;
 	void       *data;
-	struct _radiotap_info              *radiotap_info;
-	static struct _radiotap_info        rtp_info_arr;
+	struct _radiotap_info *radiotap_info = p_get_proto_data(pinfo->fd, proto_radiotap);
 	struct ieee80211_radiotap_iterator  iter;
 
 	/* MCS stuff here for later duration calculation */
@@ -674,7 +673,11 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	if (!radiotap_bit14_fcs)
 		n_overrides--;
 
-	radiotap_info = &rtp_info_arr;
+	if (!radiotap_info) {
+		/* first time we dissect this packet allocate protocol data for it */
+		radiotap_info = se_alloc0(sizeof(struct _radiotap_info));
+		p_add_proto_data(pinfo->fd, proto_radiotap, radiotap_info);
+	}
 
 	col_set_str(pinfo->cinfo, COL_PROTOCOL, "WLAN");
 	col_clear(pinfo->cinfo, COL_INFO);
