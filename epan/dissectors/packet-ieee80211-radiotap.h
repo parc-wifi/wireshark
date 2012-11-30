@@ -34,4 +34,9 @@ void proto_register_radiotap(void);
 void proto_reg_handoff_radiotap(void);
 
 struct _radiotap_info {
+  guint64 ifs; /* inter frame space before this frame in us */
+  guint64 start; /* start of frame in us */
+  guint64 end; /* end of frame in us */
 };
+
+#define NO_TSFT 0xFFFFFFFFFFFFFFFFL

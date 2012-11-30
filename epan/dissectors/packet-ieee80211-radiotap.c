@@ -33,6 +33,7 @@
 
 #include <glib.h>
 #include <errno.h>
+#include <stdio.h>
 
 #include <epan/packet.h>
 #include <epan/crc32-tvb.h>
@@ -202,6 +203,7 @@ static int hf_radiotap_quality = -1;
 static int hf_radiotap_fcs = -1;
 static int hf_radiotap_fcs_bad = -1;
 static int hf_radiotap_duration = -1;
+static int hf_radiotap_ifs = -1;
 
 static gint ett_radiotap = -1;
 static gint ett_radiotap_present = -1;
@@ -228,6 +230,7 @@ static gboolean radiotap_bit14_fcs = FALSE;
 static gboolean radiotap_interpret_high_rates_as_mcs = FALSE;
 static gboolean radiotap_assume_fec_bcc = 0;
 static gboolean radiotap_assume_short_preamble = 0;
+static gboolean radiotap_tsft_at_end = 0;
 
 static void
 dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree);
@@ -511,6 +514,17 @@ static const true_false_string preamble_type = {
 	"Long",
 };
 
+/* context kept during a capture dissection */
+static guint64 last_frame_end;
+static guint64 last_tsft;
+
+/* callback to reset context for a new capture dissection */
+static void radiotap_ifs_init(void)
+{
+	last_frame_end = NO_TSFT;
+	last_tsft = NO_TSFT;
+}
+
 /*
  * The NetBSD ieee80211_radiotap man page
  * (http://netbsd.gw.com/cgi-bin/man-cgi?ieee80211_radiotap+9+NetBSD-current)
@@ -647,6 +661,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	void       *data;
 	struct _radiotap_info *radiotap_info = p_get_proto_data(pinfo->fd, proto_radiotap);
 	struct ieee80211_radiotap_iterator  iter;
+	guint64 tsft;
 
 	/* MCS stuff here for later duration calculation */
 	guint8 mcs_known = 0;
@@ -891,11 +906,12 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		switch (iter.this_arg_index) {
 
 		case IEEE80211_RADIOTAP_TSFT:
+			tsft = tvb_get_letoh64(tvb, offset);
 			if (tree) {
 				proto_tree_add_uint64(radiotap_tree,
 						      hf_radiotap_mactime, tvb,
 						      offset, 8,
-						      tvb_get_letoh64(tvb, offset));
+						      tsft);
 			}
 			break;
 
@@ -1753,6 +1769,70 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		PROTO_ITEM_SET_GENERATED(item);
 	}
 
+	/* inter frame space */
+	if (!pinfo->fd->flags.visited) {
+		guint64 actual_tsft = tsft;
+		/* this is the first time we are looking at this frame during a
+		 * capture dissection, so we know the dissection is done in
+		 * frame order (subsequent dissections may be random access) */
+
+		/* hack: some capture files report
+		 * tsft=0 for MPDUs after the 1st in an
+		 * aggregate, so generate a tsft here
+		 */
+		if (tsft == 0 && mcs_known && last_frame_end != NO_TSFT)
+			actual_tsft = last_frame_end+2;
+		else
+		/* hack: intel microcode reports tsft = last
+		 * for MPDUs after the first in an aggregate,
+		 * so generate a correct tsft here.
+		 */
+		if (last_tsft != NO_TSFT && last_frame_end != NO_TSFT && tsft == last_tsft)
+			actual_tsft = last_frame_end+2;
+
+		if (radiotap_tsft_at_end) {
+			radiotap_info->end = actual_tsft;
+		} else {
+			radiotap_info->start = actual_tsft;
+		}
+		if (tsft != NO_TSFT && duration) {
+			if (radiotap_tsft_at_end) {
+				radiotap_info->start = duration ? actual_tsft - duration : NO_TSFT;
+			} else {
+				radiotap_info->end = duration ? actual_tsft + duration : NO_TSFT;
+			}
+		}
+
+		if (radiotap_info->start != NO_TSFT && last_frame_end != NO_TSFT) {
+			radiotap_info->ifs = radiotap_info->start - last_frame_end;
+		}
+
+		/* track the frame end time of the previous frame, to allow
+		 * calculation of ifs */
+		last_frame_end = radiotap_info->end;
+		last_tsft = tsft;
+	}
+
+	if (radiotap_info->ifs) {
+	    char buf[256], *ptr = buf;
+	    proto_item *item;
+
+	    if (radiotap_info->ifs < 10) {
+	        ptr = ", RIFS";
+	    } else if(radiotap_info->ifs < (10 + 9 * 1026)) {
+			int slots = (radiotap_info->ifs - 10) / 9;
+			sprintf(buf, ", SIFS + %d slot%s", slots, slots == 1 ? "" : "s");
+		} else {
+			ptr = "";
+		}
+
+	    item = proto_tree_add_uint_format(radiotap_tree, hf_radiotap_ifs,
+	    		tvb, 0, 0,
+	    		(guint32) radiotap_info->ifs, "inter frame space: %'u us%s",
+	    		(guint32) radiotap_info->ifs, ptr);
+	    PROTO_ITEM_SET_GENERATED(item);
+	}
+
 	tap_queue_packet(radiotap_tap, pinfo, radiotap_info);
 
 	/* dissect the 802.11 header next */
@@ -2578,6 +2658,12 @@ void proto_register_radiotap(void)
 		  "Duration of the frame in microseconds, calculated from the modulation, rate and data length",
 		  HFILL}},
 
+		{&hf_radiotap_ifs,
+		 {"inter frame space", "radiotap.ifs",
+		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  "Duration of the inter frame space prior to this frame in microseconds, calculated from end of last frame",
+		  HFILL}},
+
 	};
 	static gint *ett[] = {
 		&ett_radiotap,
@@ -2603,6 +2689,7 @@ void proto_register_radiotap(void)
 	proto_register_field_array(proto_radiotap, hf, array_length(hf));
 	proto_register_subtree_array(ett, array_length(ett));
 	register_dissector("radiotap", dissect_radiotap, proto_radiotap);
+	register_init_routine(radiotap_ifs_init);
 
 	radiotap_tap = register_tap("radiotap");
 
@@ -2628,6 +2715,12 @@ void proto_register_radiotap(void)
 					   "Assume short preamble, even if flags says long",
 					   "Some generators incorrectly report long preamble on all frames.",
 					   &radiotap_assume_short_preamble);
+
+	prefs_register_bool_preference(radiotap_module, "tsft_at_end",
+					   "TSFT measured at end of packet",
+					   "Some generators record the TSFT time at the end of the frame "
+					   "rather than the start.",
+					   &radiotap_tsft_at_end);
 }
 
 void proto_reg_handoff_radiotap(void)
