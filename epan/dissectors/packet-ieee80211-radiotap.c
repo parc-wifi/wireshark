@@ -517,12 +517,14 @@ static const true_false_string preamble_type = {
 /* context kept during a capture dissection */
 static guint64 last_frame_end;
 static guint64 last_tsft;
+static guint64 tsft_offset;
 
 /* callback to reset context for a new capture dissection */
 static void radiotap_ifs_init(void)
 {
 	last_frame_end = NO_TSFT;
 	last_tsft = NO_TSFT;
+	tsft_offset = 0;
 }
 
 /*
@@ -1771,10 +1773,24 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 
 	/* inter frame space */
 	if (!pinfo->fd->flags.visited) {
-		guint64 actual_tsft = tsft;
+		guint64 actual_tsft = tsft + tsft_offset;
 		/* this is the first time we are looking at this frame during a
 		 * capture dissection, so we know the dissection is done in
 		 * frame order (subsequent dissections may be random access) */
+
+		/* Intel capture seems to reset it's TSFT counter sometimes.
+		 * Work around it here, using frame.abs_ts to estimate the gap
+		 */
+		if (actual_tsft != 0 && actual_tsft < last_tsft && pinfo->fd->num > 1) {
+			const nstime_t *current = &pinfo->fd->abs_ts;
+			const nstime_t *prev = &pinfo->fd->prev_cap->abs_ts;
+			guint64 current_us = current->nsecs / 1000 + current->secs * 1000000;
+			guint64 prev_us = prev->nsecs / 1000 + prev->secs * 1000000;
+			tsft_offset += last_tsft-actual_tsft;
+			if (current_us > prev_us)
+				tsft_offset += current_us-prev_us;
+			actual_tsft = tsft + tsft_offset;
+		}
 
 		/* hack: some capture files report
 		 * tsft=0 for MPDUs after the 1st in an
