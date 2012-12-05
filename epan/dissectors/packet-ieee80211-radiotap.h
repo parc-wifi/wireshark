@@ -8,6 +8,10 @@
  * By Gerald Combs <gerald@wireshark.org>
  * Copyright 1998 Gerald Combs
  *
+ * Copyright (C) 2012 Palo Alto Research Center Incorporated and
+ * Samsung Electronics Co., Ltd.  All rights reserved.
+ * Author Simon Barber
+ *
  * Copied from README.developer
  *
  * This program is free software; you can redistribute it and/or
