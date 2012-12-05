@@ -130,6 +130,11 @@ expose_event_callback (GtkWidget *widget,
 		float x, width;
 		GdkColor color;
 
+		/* skip frames we don't have start and end data for */
+		/* TODO: show something, so it's clear a frame is missing */
+		if (ri->start == NO_TSFT || ri->end == NO_TSFT)
+			continue;
+
 		x = ((gint64) (ri->start - tl->start))*zoom;
 
 		/* is there a previous anti-aliased pixel to output */
