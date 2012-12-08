@@ -35,8 +35,12 @@ void proto_reg_handoff_radiotap(void);
 
 struct _radiotap_info {
   guint64 ifs; /* inter frame space before this frame in us */
+  int duration; /* calculated total frame duration in microseconds */
+  int preamble; /* preamble length in microseconds */
   guint64 start; /* start of frame in us */
   guint64 end; /* end of frame in us */
+  guint32 aggregate; /* 0 = not aggregate, n = part of aggregate n */
+  int offset; /* account for unexpected changes in TSFT */
 };
 
 #define NO_TSFT 0xFFFFFFFFFFFFFFFFL

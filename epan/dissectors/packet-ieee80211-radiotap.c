@@ -204,6 +204,11 @@ static int hf_radiotap_fcs = -1;
 static int hf_radiotap_fcs_bad = -1;
 static int hf_radiotap_duration = -1;
 static int hf_radiotap_ifs = -1;
+static int hf_radiotap_frlen = -1;
+static int hf_radiotap_preamble = -1;
+static int hf_radiotap_aggregate = -1;
+static int hf_radiotap_start = -1;
+static int hf_radiotap_end = -1;
 
 static gint ett_radiotap = -1;
 static gint ett_radiotap_present = -1;
@@ -230,6 +235,8 @@ static gboolean radiotap_bit14_fcs = FALSE;
 static gboolean radiotap_interpret_high_rates_as_mcs = FALSE;
 static gboolean radiotap_assume_fec_bcc = 0;
 static gboolean radiotap_assume_short_preamble = 0;
+static gboolean radiotap_assume_no_stbc = 0;
+static gboolean radiotap_assume_ness_0 = 0;
 static gboolean radiotap_tsft_at_end = 0;
 
 static void
@@ -518,6 +525,8 @@ static const true_false_string preamble_type = {
 static guint64 last_frame_end;
 static guint64 last_tsft;
 static guint64 tsft_offset;
+static int aggregate_count, aggregate_detected;
+static int prev_length; /* running total of length for A-MPDUs */
 
 /* callback to reset context for a new capture dissection */
 static void radiotap_ifs_init(void)
@@ -525,6 +534,8 @@ static void radiotap_ifs_init(void)
 	last_frame_end = NO_TSFT;
 	last_tsft = NO_TSFT;
 	tsft_offset = 0;
+	aggregate_count = 0;
+	aggregate_detected = 0;
 }
 
 /*
@@ -649,7 +660,6 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	tvbuff_t *next_tvb;
 	guint8 version;
 	guint length; /* length of radiotap header */
-	guint frame_length; /* length of 802.11 frame data */
 	guint32 rate = 0, freq;
 	proto_item *rate_ti;
 	gint8       dbm, db;
@@ -662,11 +672,13 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 	gint        err               = -ENOENT;
 	void       *data;
 	struct _radiotap_info *radiotap_info = p_get_proto_data(pinfo->fd, proto_radiotap);
+	struct _radiotap_info *prev_info = pinfo->fd->prev_cap ?
+			p_get_proto_data((frame_data *) pinfo->fd->prev_cap, proto_radiotap) : NULL;
 	struct ieee80211_radiotap_iterator  iter;
 	guint64 tsft;
+	proto_item *tsft_item = NULL;
 
 	/* MCS stuff here for later duration calculation */
-	guint8 mcs_known = 0;
 	guint8 have_mcs = 0, mcs;
 	guint have_bandwidth = 0, bandwidth; /* 0 = 20, 1 = 40 */
 	guint have_gi_length = 0, gi_length; /* 0 = long, 1 = short */
@@ -910,7 +922,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		case IEEE80211_RADIOTAP_TSFT:
 			tsft = tvb_get_letoh64(tvb, offset);
 			if (tree) {
-				proto_tree_add_uint64(radiotap_tree,
+				tsft_item = proto_tree_add_uint64(radiotap_tree,
 						      hf_radiotap_mactime, tvb,
 						      offset, 8,
 						      tsft);
@@ -1281,7 +1293,7 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 		case IEEE80211_RADIOTAP_MCS: {
 			proto_tree *mcs_tree = NULL, *mcs_known_tree;
-			guint		mcs_flags;
+			guint		mcs_known, mcs_flags;
 			gboolean	can_calculate_rate;
 
 			/*
@@ -1663,116 +1675,163 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		}
 	}
 
-	frame_length = tvb_length(next_tvb);
-
-	if (radiotap_assume_fec_bcc) {
-		have_fec = 1;
-		fec_ldpc = 0;
-	}
-
-	/* calculation of frame duration
-	 * Things we need to know to calculate accurate duration
-	 * 802.11 / 802.11b (DSSS or CCK modulation)
-	 * - length of preamble
-	 * - rate
-	 * 802.11a / 802.11g (OFDM modulation)
-	 * - rate
-	 * 802.11n
-	 * - whether frame preamble is mixed or greenfield, (assume mixed)
-	 * - guard interval, 800ns or 400ns (assume 800ns)
-	 * - bandwidth, 20Mhz or 40Mhz (assume 20Mhz)
-	 * - MCS index - used with previous 2 to calculate rate
-	 * - how many additional STBC streams are used (assume 0)
-	 * - how many optional extension spatial streams are used (assume 0)
-	 * - whether BCC or LDCP coding is used (assume BCC)
-	 */
-
-	if (have_mcs && have_bandwidth && have_gi_length && have_fec
-			&& have_stbc && have_ness && have_greenfield) {
-		/* This is an 802.11n HT frame and we have all the
-		 * fields required to calculate the duration */
-		static const guint Nhtdltf[4] = {1, 2, 4, 4};
-		static const guint Nhteltf[4] = {0, 1, 2, 4};
-		guint Nsts, bits, Mstbc, bits_per_symbol, symbols;
-
-		/* preamble duration
-		 * see ieee802.11n-2009 Figure 20-1 - PPDU format
-		 * for HT-mixed format
-		 * L-STF 8us, L-LTF 8us, L-SIG 4us, HT-SIG 8us, HT_STF 4us
-		 * for HT-greenfield
-		 * HT-GF-STF 8us, HT-LTF1 8us, HT_SIG 8us
-		 */
-		preamble = greenfield ? 24 : 32;
-
-		/* calculate number of HT-LTF training symbols.
-		 * see ieee80211n-2009 20.3.9.4.6 table 20-11 */
-		Nsts = ieee80211_ht_streams[mcs] + stbc;
-		preamble += 4 * (Nhtdltf[Nsts] + Nhteltf[ness]);
-
-		/* data field calculation */
-		if (!fec_ldpc) {
-			/* see ieee80211n-2009 20.3.11 (20-32) - for BCC FEC */
-			bits = 8 * frame_length + 16 + ieee80211_ht_Nes[mcs] * 6;
-			Mstbc = stbc ? 2 : 1;
-			bits_per_symbol = ieee80211_ht_Dbps[mcs] * (bandwidth ? 2 : 1);
-			symbols = bits / (bits_per_symbol * Mstbc);
-		} else {
-			/* TODO: handle LDPC FEC, it changes the rounding */
-		}
-		/* round up to whole symbols */
-		if((bits % (bits_per_symbol * Mstbc)) > 0)
-			symbols++;
-
-		symbols *= Mstbc;
-		duration = preamble + (symbols * (gi_length ? 40 : 36)) / 10;
-	} else if (rate == 2
-			|| rate == 4
-			|| rate == 11
-			|| rate == 22) {
-		/* rate is 1, 2, 5.5 or 11Mbit
-		 * assume a DSSS or CCK frame */
-
-		/* determine the preamble length from the radiotap flags field */
-		preamble = (radiotap_assume_short_preamble || (rflags & IEEE80211_RADIOTAP_F_SHORTPRE))
-				? (72 + 24) : (144 + 48);
-		duration = preamble + frame_length * 4 / rate;
-
-		/* round up to whole microseconds */
-		if (frame_length * 4 % rate)
-			duration++;
-	} else if (rate == 12
-			|| rate == 18
-			|| rate == 24
-			|| rate == 36
-			|| rate == 48
-			|| rate == 72
-			|| rate == 96
-			|| rate == 108) {
-		guint bits, symbols;
-		/* rate is 6, 9, 12, 18, 24, 36, 48 or 54Mbit
-		 * assume an 11a or 11g OFDM frame */
-
-		/* preamble + signal */
-		preamble = 16 + 4;
-		/* 16 service bits, data and 6 tail bits */
-		bits = 16 + 8 * frame_length + 6;
-
-		symbols = bits / (rate * 2);
-		/* round up to whole symbols */
-		if (bits % (rate * 2)) symbols++;
-
-		duration = preamble + symbols * 4;
-	}
-
-    if (duration != 0) {
-		proto_item *item = proto_tree_add_uint_format(radiotap_tree,
-				hf_radiotap_duration, tvb, 0, 0, (guint32) duration,
-				"duration: %'u us", (unsigned int) duration);
-		PROTO_ITEM_SET_GENERATED(item);
-	}
-
-	/* inter frame space */
+	/* this is the first time we are looking at this frame during a
+	 * capture dissection, so we know the dissection is done in
+	 * frame order (subsequent dissections may be random access) */
 	if (!pinfo->fd->flags.visited) {
+		guint frame_length = tvb_length(next_tvb);
+		/* make sure frame_length includes the FCS for accurate duration calculation */
+		if (pinfo->pseudo_header->ieee_802_11.fcs_len == 0) {
+			frame_length += 4;
+		}
+
+		/* A-MPDU / aggregate detection */
+		if (pinfo->fd->num > 1) {
+			if ( /* some capture cards report tsft=0 for MPDUs in an aggregate after the 1st */
+				(tsft == 0 && have_mcs && last_frame_end != NO_TSFT)
+				|| /* Intel reports tsft all identical for MPDUs within an aggregate */
+				(last_tsft != NO_TSFT && tsft == (last_tsft - tsft_offset) )  )
+			{
+				/* we're in an aggregate */
+				tsft = last_tsft - tsft_offset;
+
+				if (!aggregate_detected) {
+					/* this is the second frame in an aggregate - where
+					 * we first detect the aggregate
+					 */
+					aggregate_detected = 1;
+
+					/* bump the aggregate conversation count */
+					aggregate_count++;
+
+					/* go back to the first frame in the aggregate,
+					 * and mark it as an aggregate */
+					prev_info->aggregate = aggregate_count;
+
+					/* add the MPDU delimiter length that was missed */
+					prev_length += 4;
+				}
+				radiotap_info->aggregate = aggregate_count;
+
+				/* round up previous frame length (padding) */
+				if (prev_length % 4 != 0) {
+					prev_length = (prev_length | 3) + 1;
+				}
+				frame_length += prev_length + 4;
+			} else
+				aggregate_detected = 0;
+		}
+
+		prev_length = frame_length;
+
+		if (!have_fec && radiotap_assume_fec_bcc) {
+			have_fec = 1;
+			fec_ldpc = 0;
+		}
+		if (!have_stbc && radiotap_assume_no_stbc) {
+			have_stbc = 1;
+			stbc = 0;
+		}
+		if (!have_ness && radiotap_assume_ness_0) {
+			have_ness = 1;
+			ness = 0;
+		}
+
+		/* calculation of frame duration
+		 * Things we need to know to calculate accurate duration
+		 * 802.11 / 802.11b (DSSS or CCK modulation)
+		 * - length of preamble
+		 * - rate
+		 * 802.11a / 802.11g (OFDM modulation)
+		 * - rate
+		 * 802.11n
+		 * - whether frame preamble is mixed or greenfield, (assume mixed)
+		 * - guard interval, 800ns or 400ns (assume 800ns)
+		 * - bandwidth, 20Mhz or 40Mhz (assume 20Mhz)
+		 * - MCS index - used with previous 2 to calculate rate
+		 * - how many additional STBC streams are used (assume 0)
+		 * - how many optional extension spatial streams are used (assume 0)
+		 * - whether BCC or LDCP coding is used (assume BCC)
+		 */
+
+		if (have_mcs && have_bandwidth && have_gi_length && have_fec
+				&& have_stbc && have_ness && have_greenfield) {
+			/* This is an 802.11n HT frame and we have all the
+			 * fields required to calculate the duration */
+			static const guint Nhtdltf[4] = {1, 2, 4, 4};
+			static const guint Nhteltf[4] = {0, 1, 2, 4};
+			guint Nsts, bits, Mstbc, bits_per_symbol, symbols;
+
+			/* preamble duration
+			 * see ieee802.11n-2009 Figure 20-1 - PPDU format
+			 * for HT-mixed format
+			 * L-STF 8us, L-LTF 8us, L-SIG 4us, HT-SIG 8us, HT_STF 4us
+			 * for HT-greenfield
+			 * HT-GF-STF 8us, HT-LTF1 8us, HT_SIG 8us
+			 */
+			preamble = greenfield ? 24 : 32;
+
+			/* calculate number of HT-LTF training symbols.
+			 * see ieee80211n-2009 20.3.9.4.6 table 20-11 */
+			Nsts = ieee80211_ht_streams[mcs] + stbc;
+			preamble += 4 * (Nhtdltf[Nsts-1] + Nhteltf[ness]);
+
+			/* data field calculation */
+			if (!fec_ldpc) {
+				/* see ieee80211n-2009 20.3.11 (20-32) - for BCC FEC */
+				bits = 8 * frame_length + 16 + ieee80211_ht_Nes[mcs] * 6;
+				Mstbc = stbc ? 2 : 1;
+				bits_per_symbol = ieee80211_ht_Dbps[mcs] * (bandwidth ? 2 : 1);
+				symbols = bits / (bits_per_symbol * Mstbc);
+			} else {
+				/* TODO: handle LDPC FEC, it changes the rounding */
+			}
+			/* round up to whole symbols */
+			if((bits % (bits_per_symbol * Mstbc)) > 0)
+				symbols++;
+
+			symbols *= Mstbc;
+			duration = preamble + (symbols * (gi_length ? 36 : 40)) / 10;
+		} else if (rate == 2
+				|| rate == 4
+				|| rate == 11
+				|| rate == 22) {
+			/* rate is 1, 2, 5.5 or 11Mbit
+			 * assume a DSSS or CCK frame */
+
+			/* determine the preamble length from the radiotap flags field */
+			preamble = (radiotap_assume_short_preamble || (rflags & IEEE80211_RADIOTAP_F_SHORTPRE))
+					? (72 + 24) : (144 + 48);
+			duration = preamble + frame_length * 16 / rate;
+
+			/* round up to whole microseconds */
+			if (frame_length * 4 % rate)
+				duration++;
+		} else if (rate == 12
+				|| rate == 18
+				|| rate == 24
+				|| rate == 36
+				|| rate == 48
+				|| rate == 72
+				|| rate == 96
+				|| rate == 108) {
+			guint bits, symbols;
+			/* rate is 6, 9, 12, 18, 24, 36, 48 or 54Mbit
+			 * assume an 11a or 11g OFDM frame */
+
+			/* preamble + signal */
+			preamble = 16 + 4;
+			/* 16 service bits, data and 6 tail bits */
+			bits = 16 + 8 * frame_length + 6;
+
+			symbols = bits / (rate * 2);
+			/* round up to whole symbols */
+			if (bits % (rate * 2)) symbols++;
+
+			duration = preamble + symbols * 4;
+		}
+
+		/* frame start and end determination */
 		guint64 actual_tsft = tsft + tsft_offset;
 		/* this is the first time we are looking at this frame during a
 		 * capture dissection, so we know the dissection is done in
@@ -1781,41 +1840,42 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		/* Intel capture seems to reset it's TSFT counter sometimes.
 		 * Work around it here, using frame.abs_ts to estimate the gap
 		 */
-		if (actual_tsft != 0 && actual_tsft < last_tsft && pinfo->fd->num > 1) {
+		if (tsft != 0 && actual_tsft < last_tsft && pinfo->fd->num > 1) {
 			const nstime_t *current = &pinfo->fd->abs_ts;
 			const nstime_t *prev = &pinfo->fd->prev_cap->abs_ts;
 			guint64 current_us = current->nsecs / 1000 + current->secs * 1000000;
 			guint64 prev_us = prev->nsecs / 1000 + prev->secs * 1000000;
-			tsft_offset += last_tsft-actual_tsft;
+			radiotap_info->offset = last_tsft-actual_tsft;
 			if (current_us > prev_us)
-				tsft_offset += current_us-prev_us;
+				radiotap_info->offset += current_us-prev_us;
+			tsft_offset += radiotap_info->offset;
 			actual_tsft = tsft + tsft_offset;
 		}
 
-		/* hack: some capture files report
-		 * tsft=0 for MPDUs after the 1st in an
-		 * aggregate, so generate a tsft here
-		 */
-		if (tsft == 0 && mcs_known && last_frame_end != NO_TSFT)
-			actual_tsft = last_frame_end+2;
-		else
-		/* hack: intel microcode reports tsft = last
-		 * for MPDUs after the first in an aggregate,
-		 * so generate a correct tsft here.
-		 */
-		if (last_tsft != NO_TSFT && last_frame_end != NO_TSFT && tsft == last_tsft)
-			actual_tsft = last_frame_end+2;
-
-		if (radiotap_tsft_at_end) {
-			radiotap_info->end = actual_tsft;
-		} else {
-			radiotap_info->start = actual_tsft;
-		}
-		if (tsft != NO_TSFT && duration) {
+		if (aggregate_detected) {
 			if (radiotap_tsft_at_end) {
-				radiotap_info->start = duration ? actual_tsft - duration : NO_TSFT;
+				/* TODO */
 			} else {
-				radiotap_info->end = duration ? actual_tsft + duration : NO_TSFT;
+				radiotap_info->start = prev_info->end;
+				radiotap_info->end = actual_tsft + duration;
+				radiotap_info->duration = radiotap_info->end-radiotap_info->start;
+				radiotap_info->preamble = 0;
+			}
+		} else {
+			radiotap_info->duration = duration;
+			radiotap_info->preamble = preamble;
+
+			if (radiotap_tsft_at_end) {
+				radiotap_info->end = actual_tsft;
+			} else {
+				radiotap_info->start = actual_tsft;
+			}
+			if (tsft != NO_TSFT && duration) {
+				if (radiotap_tsft_at_end) {
+					radiotap_info->start = duration ? actual_tsft - duration : NO_TSFT;
+				} else {
+					radiotap_info->end = duration ? actual_tsft + duration : NO_TSFT;
+				}
 			}
 		}
 
@@ -1826,14 +1886,14 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		/* track the frame end time of the previous frame, to allow
 		 * calculation of ifs */
 		last_frame_end = radiotap_info->end;
-		last_tsft = tsft;
+		last_tsft = actual_tsft;
 	}
 
 	if (radiotap_info->ifs) {
 	    char buf[256], *ptr = buf;
 	    proto_item *item;
 
-	    if (radiotap_info->ifs < 10) {
+	    if (radiotap_info->ifs > 0 && radiotap_info->ifs < 10) {
 	        ptr = ", RIFS";
 	    } else if(radiotap_info->ifs < (10 + 9 * 1026)) {
 			int slots = (radiotap_info->ifs - 10) / 9;
@@ -1842,12 +1902,38 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 			ptr = "";
 		}
 
-	    item = proto_tree_add_uint_format(radiotap_tree, hf_radiotap_ifs,
+	    item = proto_tree_add_int_format(radiotap_tree, hf_radiotap_ifs,
 	    		tvb, 0, 0,
-	    		(guint32) radiotap_info->ifs, "inter frame space: %'u us%s",
-	    		(guint32) radiotap_info->ifs, ptr);
+	    		(gint) radiotap_info->ifs, "inter frame space: %'d us%s",
+	    		(int) radiotap_info->ifs, ptr);
 	    PROTO_ITEM_SET_GENERATED(item);
 	}
+
+    if (radiotap_info->duration != 0) {
+		proto_item *item = proto_tree_add_uint_format(radiotap_tree,
+				hf_radiotap_duration, tvb, 0, 0, (guint32) radiotap_info->duration,
+				"duration: %'u us", (unsigned int) radiotap_info->duration);
+		PROTO_ITEM_SET_GENERATED(item);
+	}
+    if (radiotap_info->preamble != 0) {
+		proto_item *item = proto_tree_add_uint_format(radiotap_tree,
+				hf_radiotap_preamble, tvb, 0, 0, (guint32) radiotap_info->preamble,
+				"plcp: %'u us", (unsigned int) radiotap_info->preamble);
+		PROTO_ITEM_SET_GENERATED(item);
+	}
+
+	if (radiotap_info->aggregate) {
+		proto_tree_add_uint(radiotap_tree, hf_radiotap_aggregate,
+	    		tvb, 0, 0, radiotap_info->aggregate);
+	}
+	proto_tree_add_uint64(radiotap_tree, hf_radiotap_start,
+		tvb, 0, 0, radiotap_info->start);
+	proto_tree_add_uint64(radiotap_tree, hf_radiotap_end,
+		tvb, 0, 0, radiotap_info->end);
+
+	if (tsft_item && prev_info && radiotap_info->offset != prev_info->offset)
+		expert_add_info_format(pinfo, tsft_item, PI_SEQUENCE, PI_WARN,
+				"TSFT jumped backwards ~%d (estimated from capture time)", radiotap_info->offset - prev_info->offset);
 
 	tap_queue_packet(radiotap_tap, pinfo, radiotap_info);
 
@@ -2676,8 +2762,38 @@ void proto_register_radiotap(void)
 
 		{&hf_radiotap_ifs,
 		 {"inter frame space", "radiotap.ifs",
-		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  FT_INT32, BASE_DEC, NULL, 0x0,
 		  "Duration of the inter frame space prior to this frame in microseconds, calculated from end of last frame",
+		  HFILL}},
+
+		{&hf_radiotap_frlen,
+		 {"inter frame space", "radiotap.frlen",
+		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  "bytes of frame",
+		  HFILL}},
+
+		{&hf_radiotap_preamble,
+		 {"inter frame space", "radiotap.preamble",
+		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  "Duration of the PLCP preamble in microseconds",
+		  HFILL}},
+
+		{&hf_radiotap_aggregate,
+		 {"A-MPDU", "radiotap.aggregate",
+		  FT_UINT32, BASE_DEC, NULL, 0x0,
+		  "Frame is part of an A-MPDU. This is the index",
+		  HFILL}},
+
+		{&hf_radiotap_start,
+		 {"start time", "radiotap.start",
+		  FT_UINT64, BASE_DEC, NULL, 0x0,
+		  "Calculated frame start time",
+		  HFILL}},
+
+		{&hf_radiotap_end,
+		 {"end time", "radiotap.end",
+		  FT_UINT64, BASE_DEC, NULL, 0x0,
+		  "Calculated frame end time",
 		  HFILL}},
 
 	};
@@ -2722,15 +2838,25 @@ void proto_register_radiotap(void)
 				       "Some generators use the datarate field with bit 7 set to indicate an MCS.",
 				       &radiotap_interpret_high_rates_as_mcs);
 
+	prefs_register_bool_preference(radiotap_module, "assume_short_preamble",
+					   "Assume DSSS/CCK short preamble, even if flags indicate long",
+					   "Some generators incorrectly report long preamble on all frames.",
+					   &radiotap_assume_short_preamble);
+
 	prefs_register_bool_preference(radiotap_module, "assume_fec_bcc",
-					   "Assume HT FEC is BCC",
+					   "Assume HT FEC is BCC if not reported",
 					   "Some generators do not report the FEC type.",
 					   &radiotap_assume_fec_bcc);
 
-	prefs_register_bool_preference(radiotap_module, "assume_short_preamble",
-					   "Assume short preamble, even if flags says long",
-					   "Some generators incorrectly report long preamble on all frames.",
-					   &radiotap_assume_short_preamble);
+	prefs_register_bool_preference(radiotap_module, "assume_no_stbc",
+					   "Assume HT not using STBC if not reported",
+					   "Some generators do not report the STBC usage.",
+					   &radiotap_assume_no_stbc);
+
+	prefs_register_bool_preference(radiotap_module, "assume_ness_0",
+					   "Assume HT not using Ness if not reported",
+					   "Some generators do not report the number of extension spatial streams.",
+					   &radiotap_assume_ness_0);
 
 	prefs_register_bool_preference(radiotap_module, "tsft_at_end",
 					   "TSFT measured at end of packet",
