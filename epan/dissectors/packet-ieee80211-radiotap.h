@@ -41,6 +41,8 @@ struct _radiotap_info {
   guint64 end; /* end of frame in us */
   guint32 aggregate; /* 0 = not aggregate, n = part of aggregate n */
   int offset; /* account for unexpected changes in TSFT */
+  int nav; /* duration field from 802.11 header - for display */
+  int nav_count;
 };
 
 #define NO_TSFT 0xFFFFFFFFFFFFFFFFL

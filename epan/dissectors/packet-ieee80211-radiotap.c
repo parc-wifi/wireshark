@@ -1887,6 +1887,12 @@ dissect_radiotap(tvbuff_t * tvb, packet_info * pinfo, proto_tree * tree)
 		 * calculation of ifs */
 		last_frame_end = radiotap_info->end;
 		last_tsft = actual_tsft;
+
+		if (tvb_length(next_tvb) >= 4) {
+			int nav = tvb_get_letohs(next_tvb, 2);
+			if ((nav & 0x8000) == 0)
+				radiotap_info->nav = nav;
+		}
 	}
 
 	if (radiotap_info->ifs) {

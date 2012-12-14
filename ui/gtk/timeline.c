@@ -129,6 +129,7 @@ expose_event_callback (GtkWidget *widget,
 		struct _radiotap_info *ri = p_get_proto_data(fdata, radiotap_proto_id);
 		float x, width;
 		GdkColor color;
+		gint end_nav;
 
 		/* skip frames we don't have start and end data for */
 		/* TODO: show something, so it's clear a frame is missing */
@@ -152,6 +153,18 @@ expose_event_callback (GtkWidget *widget,
 
 		width = (ri->end - ri->start)*zoom;
 
+		/* display NAV field at higher magnifications */
+		/* TODO: draw the frames starting at the right hand side of the screen,
+		 * so the NAV markers go on top of the later packets */
+		end_nav = x + width + ri->nav*zoom;
+		if (zoom >= 0.01 && ri->nav && end_nav > 0) {
+			gint y = packet % TIMELINE_HEIGHT;
+			gdk_gc_set_rgb_fg_color(gc, &WHITE);
+			gdk_draw_rectangle(window, gc, 1, x+width+1,y?y-1:0,end_nav,(y+1 >= TIMELINE_HEIGHT)?y:y+1);
+			gdk_gc_set_rgb_fg_color(gc, &BLACK);
+			gdk_draw_line(window, gc, x+width+1, y, end_nav, y);
+		}
+
 		/* is this packet completely to the left of the displayed area? */
 		if ((x + width) < 0.0)
 			continue;
@@ -160,17 +173,17 @@ expose_event_callback (GtkWidget *widget,
 		if (tl->first_packet < 0)
 			tl->first_packet = packet;
 
+		// clip rectangle to left of window
+		if (x < 0) {
+			width += x;
+			x = 0;
+		}
+
 		if (fdata->color_filter) {
 			const color_filter_t *cft = fdata->color_filter;
 			color_t_to_gdkcolor(&color, &cft->fg_color);
 		} else {
 			color.red = color.green = color.blue = 0;
-		}
-
-		// clip rectangle to left of window
-		if (x < 0) {
-			width += x;
-			x = 0;
 		}
 
 		/* does this rectangle fit within one pixel? */
